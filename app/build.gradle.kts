@@ -7,6 +7,8 @@ dependencies {
     implementation(project(":ext"))
     compileOnly(libs.echo.common)
     compileOnly(libs.kotlin.stdlib)
+    implementation("org.jsoup:jsoup:1.15.3")  // Required by AnimeKai extension
+    implementation("com.google.code.findbugs:jsr305:3.0.2")  // JSoup annotation dependency
 }
 
 java {
@@ -48,6 +50,10 @@ tasks.register("generateProguardRules") {
             """
                 -dontobfuscate
                 -keep,allowoptimization class dev.brahmkshatriya.echo.extension.$extClass
+                
+                # Keep JSoup classes
+                -keep class org.jsoup.** { *; }
+                -keep interface org.jsoup.** { *; }
                 """.trimMargin()
         )
     }
