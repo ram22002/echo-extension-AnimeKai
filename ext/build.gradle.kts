@@ -9,7 +9,8 @@ plugins {
 dependencies {
     compileOnly(libs.echo.common)
     compileOnly(libs.kotlin.stdlib)
-    compileOnly("org.jsoup:jsoup:1.15.3")  // For HTML parsing in AnimeKai extension
+    compileOnly("org.jsoup:jsoup:1.15.3")
+    implementation("org.json:json:20231013")// For HTML parsing in AnimeKai extension
 
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)

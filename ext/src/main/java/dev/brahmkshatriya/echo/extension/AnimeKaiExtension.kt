@@ -10,9 +10,10 @@ import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
-import dev.brahmkshatriya.echo.common.models.NetworkRequest
+import dev.brahmkshatriya.echo.common.models.NetworkRequest.Companion.toGetRequest
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Streamable
+import dev.brahmkshatriya.echo.common.models.Streamable.Media.Companion.toMedia
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
@@ -41,13 +42,6 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
     )
     private var baseUrl = DOMAIN_VALUES.first()
 
-    data class EpisodeData(
-        val token: String,
-        val num: String,
-        val title: String,
-        val subdub: String
-    )
-
     private fun parseResultResponse(jsonString: String): String? {
         return try {
             val resultIndex = jsonString.indexOf("\"result\":")
@@ -72,7 +66,6 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                             '\\' -> result.append('\\')
                             '/' -> result.append('/')
                             'u' -> {
-                                // Unicode escape sequence \uXXXX
                                 if (i + 4 < jsonString.length) {
                                     try {
                                         val unicode = jsonString.substring(i + 1, i + 5)
@@ -100,7 +93,6 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
 
             result.toString()
         } catch (e: Exception) {
-            println("AnimeKai: JSON parse error: ${e.message}")
             null
         }
     }
@@ -120,7 +112,6 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
 
             parseResultResponse(jsonText) ?: System.currentTimeMillis().toString()
         } catch (e: Exception) {
-            println("AnimeKai: Encode error: ${e.message}")
             System.currentTimeMillis().toString()
         }
     }
@@ -148,10 +139,8 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
             val urlValueEnd = jsonText.indexOf("\"", urlValueStart)
             if (urlValueEnd == -1) return null
 
-            jsonText.substring(urlValueStart, urlValueEnd)
-                .replace("\\/", "/")
+            jsonText.substring(urlValueStart, urlValueEnd).replace("\\/", "/")
         } catch (e: Exception) {
-            println("AnimeKai: Decode error: ${e.message}")
             null
         }
     }
@@ -165,10 +154,9 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                     .build()
                 val response = httpClient.newCall(request).await()
                 response.close()
-                println("AnimeKai: Using domain: $domain")
                 return domain
             } catch (e: Exception) {
-                println("AnimeKai: Domain $domain failed")
+                continue
             }
         }
         return DOMAIN_VALUES.first()
@@ -178,7 +166,6 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
         baseUrl = findWorkingDomain()
     }
 
-    // ===== SearchFeedClient =====
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
         if (query.isBlank()) return emptyList<Shelf>().toFeed()
 
@@ -228,12 +215,10 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 )
             ).toFeed()
         } catch (e: Exception) {
-            println("AnimeKai: Search error: ${e.message}")
             emptyList<Shelf>().toFeed()
         }
     }
 
-    // ===== HomeFeedClient =====
     override suspend fun loadHomeFeed(): Feed<Shelf> {
         return try {
             val shelves = mutableListOf<Shelf>()
@@ -280,7 +265,7 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                         )
                     }
                 } catch (e: Exception) {
-                    println("AnimeKai: Error $name")
+                    continue
                 }
             }
 
@@ -290,7 +275,6 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
         }
     }
 
-    // ===== AlbumClient =====
     override suspend fun loadAlbum(album: Album): Album {
         return try {
             val animeUrl = album.extras?.get("animeUrl")?.toString() ?: album.id
@@ -315,8 +299,6 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
             val dubCount = document.selectFirst("#main-entity div.info span.dub")?.text()?.toIntOrNull() ?: 0
             val totalEpisodes = if (subCount > dubCount) subCount else dubCount
 
-            println("AnimeKai: Album ID: $animeId, Sub: $subCount, Dub: $dubCount")
-
             Album(
                 id = album.id,
                 title = album.title,
@@ -335,7 +317,6 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 )
             )
         } catch (e: Exception) {
-            println("AnimeKai: Album error: ${e.message}")
             album
         }
     }
@@ -343,10 +324,7 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
     override suspend fun loadTracks(album: Album): Feed<Track>? {
         return try {
             val animeId = album.extras?.get("animeId")?.toString()
-            if (animeId.isNullOrBlank()) {
-                println("AnimeKai: No anime ID")
-                return emptyList<Track>().toFeed()
-            }
+            if (animeId.isNullOrBlank()) return emptyList<Track>().toFeed()
 
             val enc = encDecEndpoints(animeId)
             val ajaxUrl = "$baseUrl/ajax/episodes/list?ani_id=$animeId&_=$enc"
@@ -362,20 +340,12 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
             val jsonText = response.body?.string() ?: ""
             response.close()
 
-            val htmlContent = parseResultResponse(jsonText)
-            if (htmlContent == null) {
-                println("AnimeKai: Failed to parse JSON")
-                return emptyList<Track>().toFeed()
-            }
+            val htmlContent = parseResultResponse(jsonText) ?: return emptyList<Track>().toFeed()
 
             val epDoc = Jsoup.parse(htmlContent)
             val episodeElements = epDoc.select("div.eplist a")
 
-            println("AnimeKai: Found ${episodeElements.size} episodes")
-
-            if (episodeElements.isEmpty()) {
-                return emptyList<Track>().toFeed()
-            }
+            if (episodeElements.isEmpty()) return emptyList<Track>().toFeed()
 
             val tracks = episodeElements.mapIndexed { index, el ->
                 val token = el.attr("token")
@@ -399,7 +369,7 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                     album = album,
                     albumOrderNumber = num.toFloatOrNull()?.toLong() ?: (index + 1).toLong(),
                     cover = album.cover,
-                    duration = 1000 * 60 * 24, // CRITICAL: Duration must be set for playability!
+                    duration = 1000 * 60 * 24,
                     extras = mapOf(
                         "token" to token,
                         "episodeNumber" to num,
@@ -408,13 +378,9 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 )
             }
 
-            println("AnimeKai: Loaded ${tracks.size} tracks")
-
             tracks.reversed().toFeed()
 
         } catch (e: Exception) {
-            println("AnimeKai: Tracks error: ${e.message}")
-            e.printStackTrace()
             emptyList<Track>().toFeed()
         }
     }
@@ -471,23 +437,12 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
         }
     }
 
-    // ===== TrackClient =====
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
-        println("AnimeKai: loadTrack called for: ${track.title}")
-        return track
-    }
+        val token = track.extras?.get("token")?.toString() ?: track.id
 
-    override suspend fun loadStreamableMedia(streamable: Streamable, isDownload: Boolean): Streamable.Media {
-        println("AnimeKai: !!!! loadStreamableMedia CALLED !!!!")
-        println("AnimeKai: Streamable ID: ${streamable.id}")
-
-        val token = streamable.id
-
-        try {
+        return try {
             val enc = encDecEndpoints(token)
             val serverListUrl = "$baseUrl/ajax/links/list?token=$token&_=$enc"
-
-            println("AnimeKai: Fetching servers from: $serverListUrl")
 
             val request = Request.Builder()
                 .url(serverListUrl)
@@ -500,127 +455,172 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
             val jsonText = response.body?.string() ?: ""
             response.close()
 
-            val htmlContent = parseResultResponse(jsonText)
-            if (htmlContent == null) {
-                throw IllegalStateException("Failed to get server list")
-            }
+            val htmlContent = parseResultResponse(jsonText) ?: return track
 
             val serverDoc = Jsoup.parse(htmlContent)
+            val serverElements = serverDoc.select("span.server[data-lid]")
 
-            // Get first server with data-lid attribute
-            val firstServerElement = serverDoc.select("span.server[data-lid]").firstOrNull()
-            if (firstServerElement == null) {
-                throw IllegalStateException("No servers found in HTML")
-            }
+            if (serverElements.isEmpty()) return track
 
-            val serverId = firstServerElement.attr("data-lid")
-            val serverName = firstServerElement.text()
-            val serverType = firstServerElement.parent()?.attr("data-id") ?: "sub"
+            val streamables = serverElements.mapIndexed { index, serverElement ->
+                val serverId = serverElement.attr("data-lid")
+                val serverName = serverElement.text()
+                val serverType = serverElement.parent()?.attr("data-id") ?: "sub"
 
-            println("AnimeKai: Using server: $serverName [$serverType] (lid: $serverId)")
-
-            val serverEnc = encDecEndpoints(serverId)
-            val iframeApiUrl = "$baseUrl/ajax/links/view?id=$serverId&_=$serverEnc"
-
-            println("AnimeKai: Fetching iframe from: $iframeApiUrl")
-
-            val iframeRequest = Request.Builder()
-                .url(iframeApiUrl)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                .header("Referer", "$baseUrl/")
-                .header("X-Requested-With", "XMLHttpRequest")
-                .build()
-
-            val iframeResponse = httpClient.newCall(iframeRequest).await()
-            val iframeJson = iframeResponse.body?.string() ?: ""
-            iframeResponse.close()
-
-            println("AnimeKai: Iframe JSON response: ${iframeJson.take(200)}...")
-
-            val encodedIframe = parseResultResponse(iframeJson)
-                ?: throw IllegalStateException("No iframe response")
-
-            val decodedIframeUrl = decodeIframe(encodedIframe)
-                ?: throw IllegalStateException("Failed to decode iframe")
-
-            println("AnimeKai: Decoded iframe URL: $decodedIframeUrl")
-
-            // Transform /e/ or /e2/ to /media/ endpoint
-            val mediaUrl = decodedIframeUrl.replace("/e/", "/media/").replace("/e2/", "/media/")
-
-            println("AnimeKai: Fetching from media URL: $mediaUrl")
-
-            val mediaRequest = Request.Builder()
-                .url(mediaUrl)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                .header("Referer", decodedIframeUrl) // Use iframe URL as referer
-                .build()
-
-            val mediaResponse = httpClient.newCall(mediaRequest).await()
-            val mediaJson = mediaResponse.body?.string() ?: ""
-            mediaResponse.close()
-
-            println("AnimeKai: Media JSON: ${mediaJson.take(200)}...")
-
-            // Parse the media response
-            val mediaResult = parseResultResponse(mediaJson)
-
-            println("AnimeKai: Media result: ${mediaResult?.take(200)}...")
-
-            // Decode the media result to get actual m3u8 URL
-            val finalVideoUrl = if (mediaResult != null) {
-                // Decode again using dec-kai
-                val decoded = decodeIframe(mediaResult)
-                println("AnimeKai: Decoded media: ${decoded?.take(200)}...")
-
-                // Try to extract URL from JSON
-                if (decoded != null && decoded.contains("\"url\"")) {
-                    decoded.substringAfter("\"url\":\"").substringBefore("\"").replace("\\/", "/")
-                } else {
-                    decoded ?: decodedIframeUrl
-                }
-            } else {
-                decodedIframeUrl
-            }
-
-            println("AnimeKai: Final video URL: $finalVideoUrl")
-
-            // Create network request with proper headers
-            val networkRequest = NetworkRequest(
-                url = finalVideoUrl,
-                headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer" to decodedIframeUrl
+                Streamable.server(
+                    id = serverId,
+                    quality = 720 - (index * 100),
+                    title = "$serverName [$serverType]"
                 )
-            )
-
-            // Determine source type
-            val sourceType = when {
-                finalVideoUrl.contains(".m3u8") || finalVideoUrl.contains("playlist") -> Streamable.SourceType.HLS
-                finalVideoUrl.contains(".mpd") -> Streamable.SourceType.DASH
-                else -> Streamable.SourceType.Progressive
             }
 
-            val source = Streamable.Source.Http(
-                request = networkRequest,
-                type = sourceType,
-                quality = 720,
-                title = "$serverName [$serverType]",
-                isVideo = true
-            )
-
-            println("AnimeKai: ✅ Created source: ${source.title} (Type: $sourceType)")
-
-            return Streamable.Media.Server(
-                sources = listOf(source),
-                merged = false
-            )
+            track.copy(streamables = streamables)
 
         } catch (e: Exception) {
-            println("AnimeKai: ❌ Error: ${e.message}")
-            e.printStackTrace()
-            throw e
+            track
         }
+    }
+
+    override suspend fun loadStreamableMedia(streamable: Streamable, isDownload: Boolean): Streamable.Media {
+        val serverId = streamable.id
+
+        val serverEnc = encDecEndpoints(serverId)
+        val iframeApiUrl = "$baseUrl/ajax/links/view?id=$serverId&_=$serverEnc"
+
+        val iframeRequest = Request.Builder()
+            .url(iframeApiUrl)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .header("Referer", "$baseUrl/")
+            .header("X-Requested-With", "XMLHttpRequest")
+            .build()
+
+        val iframeResponse = httpClient.newCall(iframeRequest).await()
+        val iframeJson = iframeResponse.body?.string() ?: ""
+        iframeResponse.close()
+
+        val encodedIframe = parseResultResponse(iframeJson)
+            ?: throw IllegalStateException("No iframe response")
+
+        val decodedIframeUrl = decodeIframe(encodedIframe)
+            ?: throw IllegalStateException("Failed to decode iframe")
+
+        val mediaUrl = decodedIframeUrl.replace("/e/", "/media/").replace("/e2/", "/media/")
+
+        val mediaRequest = Request.Builder()
+            .url(mediaUrl)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0")
+            .header("Accept", "text/html, */*; q=0.01")
+            .header("Referer", "$baseUrl/")
+            .build()
+
+        val mediaResponse = httpClient.newCall(mediaRequest).await()
+        val mediaJson = mediaResponse.body?.string() ?: ""
+        mediaResponse.close()
+
+        val encodedResult = parseResultResponse(mediaJson)
+            ?: throw IllegalStateException("No encoded result from media")
+
+        val decodedMedia = decodeMediaResult(encodedResult)
+            ?: throw IllegalStateException("Failed to decode media result")
+
+        val videoUrl = extractM3u8FromJson(decodedMedia)
+            ?: throw IllegalStateException("No video URL found in decoded media")
+
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer" to decodedIframeUrl
+        )
+
+        return Streamable.Source.Http(
+            request = videoUrl.toGetRequest(headers),
+            type = Streamable.SourceType.HLS,
+            quality = streamable.quality,
+            title = streamable.title,
+            isVideo = true
+        ).toMedia()
+    }
+
+    private suspend fun decodeMediaResult(encodedText: String): String? {
+        return try {
+            val jsonBody = """{"text":"$encodedText","agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0"}"""
+            val body = jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType())
+
+            val endpoints = listOf(
+                "https://enc-dec.app/api/dec-megaup",
+                "https://enc-dec.app/api/dec-mega",
+                "https://enc-dec.app/api/decode"
+            )
+
+            for (endpoint in endpoints) {
+                try {
+                    val request = Request.Builder()
+                        .url(endpoint)
+                        .post(body)
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                        .header("Content-Type", "application/json")
+                        .build()
+
+                    val response = httpClient.newCall(request).await()
+                    val jsonText = response.body?.string() ?: ""
+                    response.close()
+
+                    val result = parseDecodedMediaResponse(jsonText)
+                    if (result != null) return result
+                } catch (e: Exception) {
+                    continue
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun parseDecodedMediaResponse(jsonText: String): String? {
+        val resultStart = jsonText.indexOf("\"result\":")
+        if (resultStart == -1) return null
+
+        var pos = resultStart + 9
+        while (pos < jsonText.length && jsonText[pos].isWhitespace()) pos++
+
+        if (pos >= jsonText.length || jsonText[pos] != '{') return null
+
+        var braceCount = 0
+        val resultJson = StringBuilder()
+
+        while (pos < jsonText.length) {
+            val char = jsonText[pos]
+            resultJson.append(char)
+
+            if (char == '{') braceCount++
+            else if (char == '}') {
+                braceCount--
+                if (braceCount == 0) break
+            }
+            pos++
+        }
+
+        return resultJson.toString()
+    }
+
+    private fun extractM3u8FromJson(jsonText: String): String? {
+        Regex(""""sources"\s*:\s*\[\s*\{\s*"file"\s*:\s*"([^"]+)"""").find(jsonText)?.let {
+            return it.groupValues[1].replace("\\/", "/")
+        }
+
+        Regex(""""sources"\s*:\s*\[\s*"([^"]+)"""").find(jsonText)?.let {
+            return it.groupValues[1].replace("\\/", "/")
+        }
+
+        Regex(""""file"\s*:\s*"([^"]+)"""").find(jsonText)?.let {
+            return it.groupValues[1].replace("\\/", "/")
+        }
+
+        Regex("""(https?:[^"\\]+\.m3u8[^"\\]*)""").find(jsonText)?.let {
+            return it.groupValues[1].replace("\\/", "/")
+        }
+
+        return null
     }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf>? = null
