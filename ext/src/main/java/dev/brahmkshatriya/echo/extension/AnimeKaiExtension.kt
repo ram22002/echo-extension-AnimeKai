@@ -9,6 +9,7 @@ import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.awa
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
+import dev.brahmkshatriya.echo.common.models.ImageHolder
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
 import dev.brahmkshatriya.echo.common.models.NetworkRequest.Companion.toGetRequest
 import dev.brahmkshatriya.echo.common.models.Shelf
@@ -16,6 +17,8 @@ import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Streamable.Media.Companion.toMedia
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.settings.Setting
+import dev.brahmkshatriya.echo.common.settings.SettingList
+import dev.brahmkshatriya.echo.common.settings.SettingSwitch
 import dev.brahmkshatriya.echo.common.settings.Settings
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -25,22 +28,98 @@ import org.jsoup.Jsoup
 
 class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, TrackClient, AlbumClient {
 
-    override suspend fun getSettingItems(): List<Setting> = emptyList()
+    private lateinit var settings: Settings
 
-    private lateinit var setting: Settings
+    override suspend fun getSettingItems(): List<Setting> {
+        return listOf(
+            SettingList(
+                key = "preferred_domain",
+                title = "Preferred Domain",
+                entryTitles = listOf(
+                    "animekai.to",
+                    "animekai.cc",
+                    "animekai.ac",
+                    "anikai.to"
+                ),
+                entryValues = listOf("0", "1", "2", "3"),
+                defaultEntryIndex = 0
+            ),
+            SettingList(
+                key = "preferred_server",
+                title = "Preferred Server",
+                entryTitles = listOf(
+                    "Auto (First Available)",
+                    "Server 1",
+                    "Server 2"
+                ),
+                entryValues = listOf("0", "1", "2"),
+                defaultEntryIndex = 0
+            ),
+            SettingList(
+                key = "preferred_type",
+                title = "Preferred Language/Type",
+                entryTitles = listOf(
+                    "Auto (First Available)",
+                    "Sub (Hardsub)",
+                    "Softsub",
+                    "Dub"
+                ),
+                entryValues = listOf("0", "1", "2", "3"),
+                defaultEntryIndex = 0
+            ),
+            SettingList(
+                key = "display_mode",
+                title = "List Display Mode",
+                entryTitles = listOf(
+                    "Grid",
+                    "Linear"
+                ),
+                entryValues = listOf("0", "1"),
+                defaultEntryIndex = 0
+            ),
+            SettingSwitch(
+                key = "crop_covers",
+                title = "Crop Album Covers",
+                summary = "Enable to crop album cover images to fill the space",
+                defaultValue = false
+            )
+        )
+    }
+
     override fun setSettings(settings: Settings) {
-        setting = settings
+        this.settings = settings
+        val preferredDomainValue = settings.getString("preferred_domain") ?: "0"
+        val domains = listOf("animekai.to", "animekai.cc", "animekai.ac", "anikai.to")
+        val domainIndex = preferredDomainValue.toIntOrNull() ?: 0
+        baseUrl = "https://${domains.getOrElse(domainIndex) { domains[0] }}"
+        println("AnimeKai: Settings updated - Using domain: $baseUrl")
     }
 
     private val httpClient = OkHttpClient()
 
-    private val DOMAIN_VALUES = listOf(
-        "https://animekai.to",
-        "https://animekai.cc",
-        "https://animekai.ac",
-        "https://anikai.to"
-    )
-    private var baseUrl = DOMAIN_VALUES.first()
+    private var baseUrl = "https://animekai.to"
+
+    // Helper function to create ImageHolder with crop setting
+    private fun String.toImageHolderWithCrop(crop: Boolean = false): ImageHolder {
+        return if (this.isNotEmpty()) {
+            ImageHolder.NetworkRequestImageHolder(
+                request = this.toGetRequest(),
+                crop = crop
+            )
+        } else {
+            ImageHolder.NetworkRequestImageHolder(
+                request = "".toGetRequest(),
+                crop = false
+            )
+        }
+    }
+
+    // Helper function to get display type from settings
+    private fun getDisplayType(): Shelf.Lists.Type {
+        val displayModeValue = settings.getString("display_mode") ?: "0"
+        val displayModeIndex = displayModeValue.toIntOrNull() ?: 0
+        return if (displayModeIndex == 1) Shelf.Lists.Type.Linear else Shelf.Lists.Type.Grid
+    }
 
     private fun parseResultResponse(jsonString: String): String? {
         return try {
@@ -145,31 +224,18 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
         }
     }
 
-    private suspend fun findWorkingDomain(): String {
-        for (domain in DOMAIN_VALUES) {
-            try {
-                val request = Request.Builder()
-                    .url(domain)
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    .build()
-                val response = httpClient.newCall(request).await()
-                response.close()
-                return domain
-            } catch (e: Exception) {
-                continue
-            }
-        }
-        return DOMAIN_VALUES.first()
-    }
-
     override suspend fun onInitialize() {
-        baseUrl = findWorkingDomain()
+        println("AnimeKai: Extension initialized with domain: $baseUrl")
     }
 
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
+        println("AnimeKai: 🔍 loadSearchFeed called - query: $query")
         if (query.isBlank()) return emptyList<Shelf>().toFeed()
 
         return try {
+            val cropCovers = settings.getBoolean("crop_covers") ?: false
+            val displayType = getDisplayType()
+
             val request = Request.Builder()
                 .url("$baseUrl/browser?keyword=$query&page=1")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -194,7 +260,7 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                     Album(
                         id = href,
                         title = title,
-                        cover = poster.toImageHolder(),
+                        cover = poster.toImageHolderWithCrop(cropCovers),
                         subtitle = buildString {
                             if (subSpan != null) append("Sub: $subSpan ")
                             if (dubSpan != null) append("Dub: $dubSpan")
@@ -206,30 +272,39 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 }
             }
 
+            println("AnimeKai: ✅ Search found ${albums.size} results")
+
             listOf(
                 Shelf.Lists.Items(
                     id = "search",
                     title = "Results (${albums.size})",
                     list = albums,
-                    type = Shelf.Lists.Type.Grid
+                    type = displayType
                 )
             ).toFeed()
         } catch (e: Exception) {
+            println("AnimeKai: ❌ Search error: ${e.message}")
             emptyList<Shelf>().toFeed()
         }
     }
 
     override suspend fun loadHomeFeed(): Feed<Shelf> {
+        println("AnimeKai: 🏠 loadHomeFeed called")
         return try {
+            val cropCovers = settings.getBoolean("crop_covers") ?: false
+            val displayType = getDisplayType()
             val shelves = mutableListOf<Shelf>()
 
             val categories = listOf(
                 "Trending" to "$baseUrl/trending",
-                "Latest" to "$baseUrl/updates"
+                "Latest" to "$baseUrl/updates",
+                "Recent" to "$baseUrl/recent",
+                "Completed" to "$baseUrl/completed",
             )
 
             for ((name, url) in categories) {
                 try {
+                    println("AnimeKai: Loading $name from $url")
                     val request = Request.Builder()
                         .url(url)
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -248,7 +323,20 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                             val poster = el.selectFirst("a.poster img")?.attr("data-src")
                                 ?: el.selectFirst("a.poster img")?.attr("src") ?: ""
 
-                            Album(id = href, title = title, cover = poster.toImageHolder(), extras = mapOf("animeUrl" to href))
+                            // Extract sub/dub counts from home feed items
+                            val subSpan = el.selectFirst("div.info span.sub")?.text()
+                            val dubSpan = el.selectFirst("div.info span.dub")?.text()
+
+                            Album(
+                                id = href,
+                                title = title,
+                                cover = poster.toImageHolderWithCrop(cropCovers),
+                                subtitle = buildString {
+                                    if (subSpan != null) append("Sub: $subSpan ")
+                                    if (dubSpan != null) append("Dub: $dubSpan")
+                                }.trim().takeIf { it.isNotEmpty() },
+                                extras = mapOf("animeUrl" to href)
+                            )
                         } catch (e: Exception) {
                             null
                         }
@@ -260,25 +348,32 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                                 id = name.lowercase(),
                                 title = name,
                                 list = items,
-                                type = Shelf.Lists.Type.Grid
+                                type = displayType
                             )
                         )
+                        println("AnimeKai: ✅ Loaded $name - ${items.size} items")
                     }
                 } catch (e: Exception) {
+                    println("AnimeKai: ❌ Error loading $name: ${e.message}")
                     continue
                 }
             }
 
+            println("AnimeKai: ✅ Home feed loaded - ${shelves.size} shelves")
             shelves.toFeed()
         } catch (e: Exception) {
+            println("AnimeKai: ❌ Home feed error: ${e.message}")
             emptyList<Shelf>().toFeed()
         }
     }
 
     override suspend fun loadAlbum(album: Album): Album {
+        println("AnimeKai: 📀 loadAlbum called - ${album.title}")
         return try {
             val animeUrl = album.extras?.get("animeUrl")?.toString() ?: album.id
             val fullUrl = if (animeUrl.startsWith("http")) animeUrl else "$baseUrl$animeUrl"
+
+            println("AnimeKai: Fetching album from: $fullUrl")
 
             val request = Request.Builder()
                 .url(fullUrl)
@@ -291,23 +386,114 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
             response.close()
 
             val document = Jsoup.parse(html)
-            val description = document.selectFirst("div.desc")?.text() ?: ""
-            val animeId = document.selectFirst("div[data-id]")?.attr("data-id") ?: ""
-            val poster = document.selectFirst(".poster img")?.attr("src") ?: ""
 
-            val subCount = document.selectFirst("#main-entity div.info span.sub")?.text()?.toIntOrNull() ?: 0
-            val dubCount = document.selectFirst("#main-entity div.info span.dub")?.text()?.toIntOrNull() ?: 0
+            val poster = document.selectFirst(".poster img")?.attr("src") ?: ""
+            val animeId = document.selectFirst("div[data-id]")?.attr("data-id") ?: ""
+
+            val mainEntity = document.selectFirst("div#main-entity")
+            val detail = mainEntity?.selectFirst("div.detail")
+
+            // Get episode counts
+            val subCount = mainEntity?.selectFirst("div.info span.sub")?.text()?.toIntOrNull() ?: 0
+            val dubCount = mainEntity?.selectFirst("div.info span.dub")?.text()?.toIntOrNull() ?: 0
             val totalEpisodes = if (subCount > dubCount) subCount else dubCount
+
+            println("AnimeKai: ✅ Album loaded - ID: $animeId, Sub: $subCount, Dub: $dubCount")
+
+            // Get synopsis
+            val synopsis = mainEntity?.selectFirst(".desc")?.text()?.trim() ?: ""
+
+            // Get title and alternative titles
+            val titleElement = mainEntity?.selectFirst("h1.title")
+            val mainTitle = titleElement?.text()?.trim() ?: album.title
+            val altTitle = mainEntity?.selectFirst(".al-title")?.text()?.trim() ?: ""
+
+            // Get metadata from info items
+            val infoItems = detail?.select("div.item") ?: emptyList()
+            val metadata = mutableMapOf<String, String>()
+
+            infoItems.forEach { item ->
+                val label = item.selectFirst("div.name")?.text()?.trim() ?: ""
+                val value = item.selectFirst("div.value")?.let { valueDiv ->
+                    val links = valueDiv.select("a")
+                    if (links.isNotEmpty()) {
+                        links.joinToString(", ") { it.text().trim() }
+                    } else {
+                        valueDiv.text().trim()
+                    }
+                } ?: ""
+
+                if (label.isNotEmpty() && value.isNotEmpty()) {
+                    metadata[label] = value
+                }
+            }
+
+            // Get rating
+            val rating = mainEntity?.selectFirst(".rating")?.text()?.trim() ?: ""
+
+            // Get external links
+            val externalLinks = detail?.select("div div div:contains(Links:) a")?.joinToString("\n") { link ->
+                "  [${link.text()}](${link.attr("href")})"
+            } ?: ""
+
+            // Build enhanced description with sub/dub count at top
+            val enhancedDescription = buildString {
+                // Episode availability at the very top
+                append("📺 **Episodes Available:**\n")
+                if (subCount > 0) append("  • Subtitled: $subCount episodes\n")
+                if (dubCount > 0) append("  • Dubbed: $dubCount episodes\n")
+                append("\n")
+
+                // Synopsis
+                if (synopsis.isNotEmpty()) {
+                    append("**Synopsis:**\n")
+                    append(synopsis)
+                    append("\n\n")
+                }
+
+                // Metadata
+                metadata["Country:"]?.let { append("**Country:** $it\n") }
+                metadata["Premiered:"]?.let { append("**Premiered:** $it\n") }
+                metadata["Date aired:"]?.let { append("**Date aired:** $it\n") }
+                metadata["Broadcast:"]?.let { append("**Broadcast:** $it\n") }
+                metadata["Duration:"]?.let { append("**Duration:** $it\n") }
+                metadata["Studios:"]?.let { append("**Studios:** $it\n") }
+                metadata["Producers:"]?.let { append("**Producers:** $it\n") }
+                metadata["Genres:"]?.let { append("**Genres:** $it\n") }
+                metadata["Status:"]?.let { append("**Status:** $it\n") }
+                if (rating.isNotEmpty()) append("**Rating:** $rating\n")
+                metadata["MAL Score:"]?.let { append("**MAL:** $it\n") }
+
+                // Alternative title
+                if (altTitle.isNotEmpty()) {
+                    append("**Alternative Title:** $altTitle\n")
+                }
+
+                // External links
+                if (externalLinks.isNotEmpty()) {
+                    append("\n**Links:**\n")
+                    append(externalLinks)
+                }
+
+                // Cover image
+                if (poster.isNotEmpty()) {
+                    append("\n\n![Cover]($poster)")
+                }
+            }
+
+            // Get crop setting
+            val cropCovers = settings.getBoolean("crop_covers") ?: false
 
             Album(
                 id = album.id,
-                title = album.title,
-                cover = poster.toImageHolder(),
+                title = mainTitle,
+                cover = poster.toImageHolderWithCrop(cropCovers),
                 subtitle = buildString {
+                    metadata["Status:"]?.let { append("$it • ") }
                     if (subCount > 0) append("Sub: $subCount ")
                     if (dubCount > 0) append("Dub: $dubCount")
                 }.trim().takeIf { it.isNotEmpty() },
-                description = description,
+                description = enhancedDescription,
                 trackCount = totalEpisodes.toLong(),
                 extras = mapOf(
                     "animeUrl" to animeUrl,
@@ -317,17 +503,25 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 )
             )
         } catch (e: Exception) {
+            println("AnimeKai: ❌ Album error: ${e.message}")
+            e.printStackTrace()
             album
         }
     }
 
     override suspend fun loadTracks(album: Album): Feed<Track>? {
+        println("AnimeKai: 🎬 loadTracks called - ${album.title}")
         return try {
             val animeId = album.extras?.get("animeId")?.toString()
-            if (animeId.isNullOrBlank()) return emptyList<Track>().toFeed()
+            if (animeId.isNullOrBlank()) {
+                println("AnimeKai: ❌ No anime ID found")
+                return emptyList<Track>().toFeed()
+            }
 
             val enc = encDecEndpoints(animeId)
             val ajaxUrl = "$baseUrl/ajax/episodes/list?ani_id=$animeId&_=$enc"
+
+            println("AnimeKai: Fetching episodes from: $ajaxUrl")
 
             val request = Request.Builder()
                 .url(ajaxUrl)
@@ -344,6 +538,8 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
 
             val epDoc = Jsoup.parse(htmlContent)
             val episodeElements = epDoc.select("div.eplist a")
+
+            println("AnimeKai: ✅ Found ${episodeElements.size} episodes")
 
             if (episodeElements.isEmpty()) return emptyList<Track>().toFeed()
 
@@ -378,15 +574,19 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 )
             }
 
-            tracks.reversed().toFeed()
+            println("AnimeKai: ✅ Loaded ${tracks.size} tracks")
+            tracks.toFeed()
 
         } catch (e: Exception) {
+            println("AnimeKai: ❌ Tracks error: ${e.message}")
             emptyList<Track>().toFeed()
         }
     }
 
     override suspend fun loadFeed(album: Album): Feed<Shelf>? {
         return try {
+            val cropCovers = settings.getBoolean("crop_covers") ?: false
+            val displayType = getDisplayType()
             val animeUrl = album.extras?.get("animeUrl")?.toString() ?: album.id
             val fullUrl = if (animeUrl.startsWith("http")) animeUrl else "$baseUrl$animeUrl"
 
@@ -416,7 +616,12 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                         else -> ""
                     }
 
-                    Album(id = href, title = title, cover = poster.toImageHolder(), extras = mapOf("animeUrl" to href))
+                    Album(
+                        id = href,
+                        title = title,
+                        cover = poster.toImageHolderWithCrop(cropCovers),
+                        extras = mapOf("animeUrl" to href)
+                    )
                 } catch (e: Exception) {
                     null
                 }
@@ -429,7 +634,7 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                     id = "related",
                     title = "Related Anime",
                     list = related.take(10),
-                    type = Shelf.Lists.Type.Grid
+                    type = displayType
                 )
             ).toFeed()
         } catch (e: Exception) {
@@ -438,6 +643,7 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
     }
 
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
+        println("AnimeKai: ▶️ loadTrack called - ${track.title}")
         val token = track.extras?.get("token")?.toString() ?: track.id
 
         return try {
@@ -460,9 +666,61 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
             val serverDoc = Jsoup.parse(htmlContent)
             val serverElements = serverDoc.select("span.server[data-lid]")
 
-            if (serverElements.isEmpty()) return track
+            if (serverElements.isEmpty()) {
+                println("AnimeKai: ❌ No servers found")
+                return track
+            }
 
-            val streamables = serverElements.mapIndexed { index, serverElement ->
+            println("AnimeKai: Found ${serverElements.size} servers")
+
+            // Get user preferences
+            val preferredServerValue = settings.getString("preferred_server") ?: "0"
+            val preferredTypeValue = settings.getString("preferred_type") ?: "0"
+
+            val serverOptions = listOf("Auto (First Available)", "Server 1", "Server 2")
+            val typeOptions = listOf("Auto (First Available)", "Sub (Hardsub)", "Softsub", "Dub")
+
+            val preferredServerIndex = preferredServerValue.toIntOrNull() ?: 0
+            val preferredTypeIndex = preferredTypeValue.toIntOrNull() ?: 0
+
+            val preferredServer = serverOptions.getOrElse(preferredServerIndex) { serverOptions[0] }
+            val preferredType = typeOptions.getOrElse(preferredTypeIndex) { typeOptions[0] }
+
+            println("AnimeKai: User preferences - Server: $preferredServer, Type: $preferredType")
+
+            // Filter servers based on user preferences
+            var filteredServers = serverElements.toList()
+
+            // Filter by type/language preference
+            if (preferredType != "Auto (First Available)") {
+                filteredServers = filteredServers.filter { serverElement ->
+                    val serverType = serverElement.parent()?.attr("data-id") ?: ""
+                    when (preferredType) {
+                        "Sub (Hardsub)" -> serverType.equals("sub", ignoreCase = true)
+                        "Softsub" -> serverType.equals("softsub", ignoreCase = true)
+                        "Dub" -> serverType.equals("dub", ignoreCase = true)
+                        else -> true
+                    }
+                }
+            }
+
+            // Filter by server preference
+            if (preferredServer != "Auto (First Available)" && filteredServers.isNotEmpty()) {
+                val serverName = preferredServer.replace("Server ", "")
+                filteredServers = filteredServers.filter { serverElement ->
+                    val name = serverElement.text()
+                    name.contains(serverName, ignoreCase = true)
+                }.ifEmpty { filteredServers }
+            }
+
+            // If no servers match preferences, use all servers
+            if (filteredServers.isEmpty()) {
+                filteredServers = serverElements.toList()
+            }
+
+            println("AnimeKai: After filtering: ${filteredServers.size} servers available")
+
+            val streamables = filteredServers.mapIndexed { index, serverElement ->
                 val serverId = serverElement.attr("data-lid")
                 val serverName = serverElement.text()
                 val serverType = serverElement.parent()?.attr("data-id") ?: "sub"
@@ -474,14 +732,17 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 )
             }
 
+            println("AnimeKai: ✅ Created ${streamables.size} streamables")
             track.copy(streamables = streamables)
 
         } catch (e: Exception) {
+            println("AnimeKai: ❌ loadTrack error: ${e.message}")
             track
         }
     }
 
     override suspend fun loadStreamableMedia(streamable: Streamable, isDownload: Boolean): Streamable.Media {
+        println("AnimeKai: 🎥 loadStreamableMedia called - ${streamable.title}")
         val serverId = streamable.id
 
         val serverEnc = encDecEndpoints(serverId)
@@ -504,6 +765,8 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
         val decodedIframeUrl = decodeIframe(encodedIframe)
             ?: throw IllegalStateException("Failed to decode iframe")
 
+        println("AnimeKai: Iframe URL: $decodedIframeUrl")
+
         val mediaUrl = decodedIframeUrl.replace("/e/", "/media/").replace("/e2/", "/media/")
 
         val mediaRequest = Request.Builder()
@@ -525,6 +788,8 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
 
         val videoUrl = extractM3u8FromJson(decodedMedia)
             ?: throw IllegalStateException("No video URL found in decoded media")
+
+        println("AnimeKai: ✅ Video URL: $videoUrl")
 
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
