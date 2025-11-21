@@ -30,6 +30,13 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
 
     private lateinit var settings: Settings
 
+    // Data class for quality streams
+    private data class QualityStream(
+        val url: String,
+        val quality: Int,
+        val label: String
+    )
+
     override suspend fun getSettingItems(): List<Setting> {
         return listOf(
             SettingList(
@@ -42,6 +49,19 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                     "anikai.to"
                 ),
                 entryValues = listOf("0", "1", "2", "3"),
+                defaultEntryIndex = 0
+            ),
+            SettingList(
+                key = "preferred_quality",
+                title = "Preferred Quality",
+                entryTitles = listOf(
+                    "Auto (Adaptive)",
+                    "360p",
+                    "480p",
+                    "720p",
+                    "1080p"
+                ),
+                entryValues = listOf("0", "360", "480", "720", "1080"),
                 defaultEntryIndex = 0
             ),
             SettingList(
@@ -224,6 +244,79 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
         }
     }
 
+    // Parse M3U8 manifest to extract quality variants
+    private suspend fun parseM3U8Manifest(manifestUrl: String, referer: String): List<QualityStream> {
+        return try {
+            val request = Request.Builder()
+                .url(manifestUrl)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .header("Referer", referer)
+                .build()
+
+            val response = httpClient.newCall(request).await()
+            val manifestContent = response.body?.string() ?: ""
+            response.close()
+
+            println("AnimeKai: 📄 Parsing M3U8 manifest (${manifestContent.length} chars)")
+
+            val qualities = mutableListOf<QualityStream>()
+            val lines = manifestContent.lines()
+
+            var i = 0
+            while (i < lines.size) {
+                val line = lines[i].trim()
+
+                // Look for quality information in EXT-X-STREAM-INF
+                if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                    // Extract resolution
+                    val resolutionMatch = Regex("""RESOLUTION=(\d+)x(\d+)""").find(line)
+
+                    // Get the URL from next line
+                    if (i + 1 < lines.size) {
+                        val streamUrl = lines[i + 1].trim()
+                        if (streamUrl.isNotEmpty() && !streamUrl.startsWith("#")) {
+                            val fullStreamUrl = if (streamUrl.startsWith("http")) {
+                                streamUrl
+                            } else {
+                                // Resolve relative URL
+                                val baseUrl = manifestUrl.substringBeforeLast("/")
+                                "$baseUrl/$streamUrl"
+                            }
+
+                            if (resolutionMatch != null) {
+                                val height = resolutionMatch.groupValues[2].toIntOrNull() ?: 0
+
+                                val label = when {
+                                    height >= 2160 -> "4K (${height}p)"
+                                    height >= 1080 -> "Full HD (${height}p)"
+                                    height >= 720 -> "HD (${height}p)"
+                                    height >= 480 -> "SD (${height}p)"
+                                    else -> "${height}p"
+                                }
+
+                                qualities.add(QualityStream(
+                                    url = fullStreamUrl,
+                                    quality = height,
+                                    label = label
+                                ))
+
+                                println("AnimeKai: Found quality: $label")
+                            }
+                        }
+                    }
+                }
+                i++
+            }
+
+            // Sort by quality descending (highest first)
+            qualities.sortedByDescending { it.quality }
+
+        } catch (e: Exception) {
+            println("AnimeKai: ❌ Error parsing M3U8: ${e.message}")
+            emptyList()
+        }
+    }
+
     override suspend fun onInitialize() {
         println("AnimeKai: Extension initialized with domain: $baseUrl")
     }
@@ -323,7 +416,6 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                             val poster = el.selectFirst("a.poster img")?.attr("data-src")
                                 ?: el.selectFirst("a.poster img")?.attr("src") ?: ""
 
-                            // Extract sub/dub counts from home feed items
                             val subSpan = el.selectFirst("div.info span.sub")?.text()
                             val dubSpan = el.selectFirst("div.info span.dub")?.text()
 
@@ -393,22 +485,17 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
             val mainEntity = document.selectFirst("div#main-entity")
             val detail = mainEntity?.selectFirst("div.detail")
 
-            // Get episode counts
             val subCount = mainEntity?.selectFirst("div.info span.sub")?.text()?.toIntOrNull() ?: 0
             val dubCount = mainEntity?.selectFirst("div.info span.dub")?.text()?.toIntOrNull() ?: 0
             val totalEpisodes = if (subCount > dubCount) subCount else dubCount
 
             println("AnimeKai: ✅ Album loaded - ID: $animeId, Sub: $subCount, Dub: $dubCount")
 
-            // Get synopsis
             val synopsis = mainEntity?.selectFirst(".desc")?.text()?.trim() ?: ""
-
-            // Get title and alternative titles
             val titleElement = mainEntity?.selectFirst("h1.title")
             val mainTitle = titleElement?.text()?.trim() ?: album.title
             val altTitle = mainEntity?.selectFirst(".al-title")?.text()?.trim() ?: ""
 
-            // Get metadata from info items
             val infoItems = detail?.select("div.item") ?: emptyList()
             val metadata = mutableMapOf<String, String>()
 
@@ -428,30 +515,23 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 }
             }
 
-            // Get rating
             val rating = mainEntity?.selectFirst(".rating")?.text()?.trim() ?: ""
-
-            // Get external links
             val externalLinks = detail?.select("div div div:contains(Links:) a")?.joinToString("\n") { link ->
                 "  [${link.text()}](${link.attr("href")})"
             } ?: ""
 
-            // Build enhanced description with sub/dub count at top
             val enhancedDescription = buildString {
-                // Episode availability at the very top
                 append("📺 **Episodes Available:**\n")
                 if (subCount > 0) append("  • Subtitled: $subCount episodes\n")
                 if (dubCount > 0) append("  • Dubbed: $dubCount episodes\n")
                 append("\n")
 
-                // Synopsis
                 if (synopsis.isNotEmpty()) {
                     append("**Synopsis:**\n")
                     append(synopsis)
                     append("\n\n")
                 }
 
-                // Metadata
                 metadata["Country:"]?.let { append("**Country:** $it\n") }
                 metadata["Premiered:"]?.let { append("**Premiered:** $it\n") }
                 metadata["Date aired:"]?.let { append("**Date aired:** $it\n") }
@@ -464,24 +544,20 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 if (rating.isNotEmpty()) append("**Rating:** $rating\n")
                 metadata["MAL Score:"]?.let { append("**MAL:** $it\n") }
 
-                // Alternative title
                 if (altTitle.isNotEmpty()) {
                     append("**Alternative Title:** $altTitle\n")
                 }
 
-                // External links
                 if (externalLinks.isNotEmpty()) {
                     append("\n**Links:**\n")
                     append(externalLinks)
                 }
 
-                // Cover image
                 if (poster.isNotEmpty()) {
                     append("\n\n![Cover]($poster)")
                 }
             }
 
-            // Get crop setting
             val cropCovers = settings.getBoolean("crop_covers") ?: false
 
             Album(
@@ -676,17 +752,19 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
             // Get user preferences
             val preferredServerValue = settings.getString("preferred_server") ?: "0"
             val preferredTypeValue = settings.getString("preferred_type") ?: "0"
+            val preferredQualityValue = settings.getString("preferred_quality") ?: "0"
 
             val serverOptions = listOf("Auto (First Available)", "Server 1", "Server 2")
             val typeOptions = listOf("Auto (First Available)", "Sub (Hardsub)", "Softsub", "Dub")
 
             val preferredServerIndex = preferredServerValue.toIntOrNull() ?: 0
             val preferredTypeIndex = preferredTypeValue.toIntOrNull() ?: 0
+            val preferredQuality = preferredQualityValue.toIntOrNull() ?: 0
 
             val preferredServer = serverOptions.getOrElse(preferredServerIndex) { serverOptions[0] }
             val preferredType = typeOptions.getOrElse(preferredTypeIndex) { typeOptions[0] }
 
-            println("AnimeKai: User preferences - Server: $preferredServer, Type: $preferredType")
+            println("AnimeKai: User preferences - Server: $preferredServer, Type: $preferredType, Quality: ${if (preferredQuality == 0) "Auto" else "${preferredQuality}p"}")
 
             // Filter servers based on user preferences
             var filteredServers = serverElements.toList()
@@ -725,10 +803,13 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 val serverName = serverElement.text()
                 val serverType = serverElement.parent()?.attr("data-id") ?: "sub"
 
+                // Store quality preference in streamable ID
+                val qualityInfo = if (preferredQuality == 0) "auto" else preferredQuality.toString()
+
                 Streamable.server(
-                    id = serverId,
-                    quality = 720 - (index * 100),
-                    title = "$serverName [$serverType]"
+                    id = "$serverId|$qualityInfo",
+                    quality = if (preferredQuality == 0) 720 else preferredQuality,
+                    title = "$serverName [$serverType]${if (preferredQuality != 0) " - ${preferredQuality}p" else ""}"
                 )
             }
 
@@ -743,7 +824,14 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
 
     override suspend fun loadStreamableMedia(streamable: Streamable, isDownload: Boolean): Streamable.Media {
         println("AnimeKai: 🎥 loadStreamableMedia called - ${streamable.title}")
-        val serverId = streamable.id
+
+        // Extract server ID and quality preference
+        val parts = streamable.id.split("|")
+        val serverId = parts[0]
+        val qualityPref = if (parts.size > 1) parts[1] else "auto"
+        val preferredQuality = qualityPref.toIntOrNull() ?: 0
+
+        println("AnimeKai: Server ID: $serverId, Quality Preference: ${if (preferredQuality == 0) "Auto" else "${preferredQuality}p"}")
 
         val serverEnc = encDecEndpoints(serverId)
         val iframeApiUrl = "$baseUrl/ajax/links/view?id=$serverId&_=$serverEnc"
@@ -786,18 +874,52 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
         val decodedMedia = decodeMediaResult(encodedResult)
             ?: throw IllegalStateException("Failed to decode media result")
 
-        val videoUrl = extractM3u8FromJson(decodedMedia)
+        val masterUrl = extractM3u8FromJson(decodedMedia)
             ?: throw IllegalStateException("No video URL found in decoded media")
 
-        println("AnimeKai: ✅ Video URL: $videoUrl")
+        println("AnimeKai: ✅ Master M3U8 URL: $masterUrl")
 
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer" to decodedIframeUrl
         )
 
+        // If quality preference is auto (0), return master playlist
+        if (preferredQuality == 0) {
+            println("AnimeKai: Using auto quality (master playlist)")
+            return Streamable.Source.Http(
+                request = masterUrl.toGetRequest(headers),
+                type = Streamable.SourceType.HLS,
+                quality = 720,
+                title = streamable.title,
+                isVideo = true
+            ).toMedia()
+        }
+
+        // Try to get specific quality
+        val qualityStreams = parseM3U8Manifest(masterUrl, decodedIframeUrl)
+
+        if (qualityStreams.isNotEmpty()) {
+            // Find closest quality match
+            val selectedStream = qualityStreams.find { it.quality == preferredQuality }
+                ?: qualityStreams.minByOrNull { Math.abs(it.quality - preferredQuality) }
+                ?: qualityStreams.first()
+
+            println("AnimeKai: ✅ Selected quality: ${selectedStream.label} for preference ${preferredQuality}p")
+
+            return Streamable.Source.Http(
+                request = selectedStream.url.toGetRequest(headers),
+                type = Streamable.SourceType.HLS,
+                quality = selectedStream.quality,
+                title = streamable.title,
+                isVideo = true
+            ).toMedia()
+        }
+
+        // Fallback to master playlist
+        println("AnimeKai: ⚠️ Could not parse qualities, using master playlist")
         return Streamable.Source.Http(
-            request = videoUrl.toGetRequest(headers),
+            request = masterUrl.toGetRequest(headers),
             type = Streamable.SourceType.HLS,
             quality = streamable.quality,
             title = streamable.title,
