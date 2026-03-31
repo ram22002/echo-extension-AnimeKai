@@ -44,11 +44,13 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
                 title = "Preferred Domain",
                 entryTitles = listOf(
                     "animekai.to",
-                    "animekai.cc",
-                    "animekai.ac",
+                    "animekai.fi",
+                    "animekai.fo",
+                    "animekai.gs",
+                    "animekai.la",
                     "anikai.to"
                 ),
-                entryValues = listOf("0", "1", "2", "3"),
+                entryValues = listOf("0", "1", "2", "3", "4", "5"),
                 defaultEntryIndex = 0
             ),
             SettingList(
@@ -109,7 +111,7 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
     override fun setSettings(settings: Settings) {
         this.settings = settings
         val preferredDomainValue = settings.getString("preferred_domain") ?: "0"
-        val domains = listOf("animekai.to", "animekai.cc", "animekai.ac", "anikai.to")
+        val domains = listOf("animekai.to", "animekai.fi", "animekai.fo", "animekai.gs", "animekai.la", "anikai.to")
         val domainIndex = preferredDomainValue.toIntOrNull() ?: 0
         baseUrl = "https://${domains.getOrElse(domainIndex) { domains[0] }}"
         println("AnimeKai: Settings updated - Using domain: $baseUrl")
