@@ -19,6 +19,7 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.SettingList
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
+import dev.brahmkshatriya.echo.common.settings.SettingTextInput
 import dev.brahmkshatriya.echo.common.settings.Settings
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -39,6 +40,12 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
 
     override suspend fun getSettingItems(): List<Setting> {
         return listOf(
+            SettingTextInput(
+                key = "custom_domain",
+                title = "Custom Domain",
+                summary = "Enter a custom domain (e.g. animekai.to). Leave blank to use the selection below.",
+                defaultValue = ""
+            ),
             SettingList(
                 key = "preferred_domain",
                 title = "Preferred Domain",
@@ -110,11 +117,22 @@ class AnimeKaiExtension : ExtensionClient, SearchFeedClient, HomeFeedClient, Tra
 
     override fun setSettings(settings: Settings) {
         this.settings = settings
-        val preferredDomainValue = settings.getString("preferred_domain") ?: "0"
-        val domains = listOf("animekai.to", "animekai.fi", "animekai.fo", "animekai.gs", "animekai.la", "anikai.to")
-        val domainIndex = preferredDomainValue.toIntOrNull() ?: 0
-        baseUrl = "https://${domains.getOrElse(domainIndex) { domains[0] }}"
-        println("AnimeKai: Settings updated - Using domain: $baseUrl")
+        val customDomain = settings.getString("custom_domain")?.trim() ?: ""
+        if (customDomain.isNotBlank()) {
+            // Strip any protocol prefix the user may have typed
+            val cleanDomain = customDomain
+                .removePrefix("https://")
+                .removePrefix("http://")
+                .trimEnd('/')
+            baseUrl = "https://$cleanDomain"
+            println("AnimeKai: Settings updated - Using custom domain: $baseUrl")
+        } else {
+            val preferredDomainValue = settings.getString("preferred_domain") ?: "0"
+            val domains = listOf("animekai.to", "animekai.fi", "animekai.fo", "animekai.gs", "animekai.la", "anikai.to")
+            val domainIndex = preferredDomainValue.toIntOrNull() ?: 0
+            baseUrl = "https://${domains.getOrElse(domainIndex) { domains[0] }}"
+            println("AnimeKai: Settings updated - Using domain: $baseUrl")
+        }
     }
 
     private val httpClient = OkHttpClient()
